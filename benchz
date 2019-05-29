@@ -1,0 +1,145 @@
+#!/usr/bin/env zsh
+#
+#  Benchz - ZSH Benchmark tool
+#  ------------------------------------------------------------------------------
+#
+#  Description
+#  -----------
+#  A script to compare my custom configuration startup time against vanilla zsh.
+#  Adapted from https://github.com/Eriner/zsh-framework-benchmark
+#  ------------------------------------------------------------------------------
+#
+#  Authors
+#  -------
+#  Filipe Kiss <hello@filipekiss.com.br> http://github.com/filipekiss
+#  ------------------------------------------------------------------------------
+
+# ensure that we're not running zsh from THREE AND A HALF YEARS AGO
+if ! autoload -Uz is-at-least || ! is-at-least '5.0'; then
+  print "${0}: running zsh < 5.0. Any further tests would be meaningless.
+  Your shell has been outdated for over three and a half years." >&2
+  return 1
+fi
+
+typeset -A results
+spin=('/' '-' '\' '|')
+test_dir="$(mktemp -d)-zsh-benchmark"
+benchmark_dir="${${(%):-%N}:A:h}"
+keep_frameworks=false
+force_delete=false
+integer iterations=100
+
+# ensure to use dot ('.') as decimal separator, because some locale (ex: it_IT) use comma (',')
+unset LC_NUMERIC
+
+usage="${0} [options]
+Options:
+    -h                  Show this help
+    -n <num>            Set the number of iterations to run"
+
+while [[ ${#} -gt 0 ]]; do
+  case ${1} in
+    -h) print ${usage}
+        return 0
+        ;;
+    -n) shift
+        iterations=${1}
+        shift
+        ;;
+    *) print ${usage}
+       return 1
+       ;;
+  esac
+done
+
+if (( ${#} )); then
+  print ${usage}
+  return 1
+fi
+
+# we will use zpty to run all of the tests asynchronously
+zmodload zsh/zpty || return 1
+
+
+# the test_dir will be created by any (and every) framework's init script
+# create the directory for the results.
+results_dir=${test_dir}-results
+mkdir -p ${results_dir}
+
+
+spin() {
+  local i
+  for i in ${spin[@]}; do
+    print -n "\b${i}"
+    sleep 0.1
+  done
+}
+
+get_avg_startup() {
+  local startup_time startup_total startup_avg
+  local i n
+
+  startup_times=($(sed -e 's/.*cpu //' -e 's/ total//' ${results_dir}/${1}.log))
+  for i in ${startup_times}; do (( startup_total += ${i} )); done
+  (( startup_avg = ${startup_total} / ${#startup_times} * 1000 ))
+  startup_avg=$(printf "%.0f ms" ${startup_avg})
+
+  results+=(${1} ${startup_avg})
+
+  print "\rThe average startup time for ${1} is: ${(kv)results[${1}]}"
+}
+
+benchmark() {
+  # first delete any old instances of the frameworks
+  rm -rf "${test_dir}/${1}"
+
+  # setup the directory for the framework
+  mkdir -p ${test_dir}/${1}
+
+  case "$1" in
+      vanilla)
+          local_zdotdir="${test_dir}/${1}"
+          ;;
+      custom)
+          local_zdotdir="${ZDOTDIR:-${HOME}}"
+          ;;
+  esac
+
+  # # source the installer
+  print -n "\rNow setting up ${1}... ${spin[1]}"
+  zpty -b ${1}-setup "source ${benchmark_dir}/${1}.zsh &>/dev/null"
+  while zpty -t ${1}-setup 2> /dev/null; do
+    spin
+  done
+
+  # ensure we have a file
+  touch "${test_dir}-results/${1}.log"
+
+  # setup for run counting
+  if [[ -s "${test_dir}-results/${1}.log" ]]; then
+    local integer total_runs=$(wc -l < "${test_dir}-results/${1}.log")
+  else
+    local integer total_runs=0
+  fi
+
+
+  # set up the zpty for the framework
+  zpty -b ${1} "ZDOTDIR=${local_zdotdir} zsh -c \"for i in {1..${iterations}}; do {time zsh -ic 'exit' } 2>>! ${results_dir}/${1}.log; done\""
+  while zpty -t ${1} 2> /dev/null; do
+    # calculate how many runs we've done
+    local iter=$(( $(wc -l < "${test_dir}-results/${1}.log") - ${total_runs} ))
+    print -n "\rNow benchmarking ${1}... (${iter} / ${iterations}) ${spin[1]}"
+    spin
+  done
+
+  # cleanup zpty
+  zpty -d ${1}-setup
+  zpty -d ${1}
+
+  # print average time
+  get_avg_startup ${1}
+
+}
+
+benchmark "vanilla"
+benchmark "custom"
